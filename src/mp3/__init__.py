@@ -1,17 +1,17 @@
 #
 # mp3.py -- MP3-frame meta-data parser
 # Copyright (C) 2003-2004  Sune Kirkeby
-# 
+#
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation; either version 2 of the License, or
 # (at your option) any later version.
-# 
+#
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-# 
+#
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
@@ -57,12 +57,12 @@ def frameheader(dat, i):
     Parse the header of the MP3-frame found at offset i in buf.
 
     MP3-frame headers are tuples of
-    
+
         (version, layer, crc, bitrate, samplingrate, padding)
 
     The fields returned in the header-tuple are mostly self-explaining,
     if you know MP3-files. There are a few pit-falls, though:
-    
+
     The version is an integer for MP3-versions 1 and 2, but there
     exists an unofficial version 2.5 (which supports different bitrates
     and sampling rates than version 2), for which version is a float.
@@ -70,7 +70,7 @@ def frameheader(dat, i):
     The bitrate is returned in kbit/s (e.g. 128, 192).
 
     The sampling rate is returned in Hz (e.g. 44100)."""
-    
+
     if len(dat) - i < 4:
         raise MP3FrameHeaderError, 'frame too short for MPEG-header'
 
@@ -95,7 +95,7 @@ def frameheader(dat, i):
         raise MP3FrameHeaderError, 'unknown Layer description'
     else:
         layer = 4 - layer
-    
+
     # bit 16 (crc present)
     crc = not (bytes[1] & 1)
 
@@ -118,12 +118,25 @@ def frameheader(dat, i):
     # bit 9 (padding present)
     padding = (bytes[2] & 2) >> 1
 
-    # bit 8 (private, ignored)
+    # bit 8 (private)
+    private = (bytes[2] & 1)
 
-    # bits 7 - 0 not read, they contain no information useful
-    # outside MPEG-decoding
+    # bit 7 - 6 (channel mode)
+    channelmode = bytes[3] >> 6
 
-    return version, layer, crc, bitrate, samplingrate, padding
+    # bit 5 - 4 (mode extension)
+    modeextension = (bytes[3] & 48) >> 4
+
+    # bit 3 (copyright)
+    copyright = (bytes[3] & 8) >> 3
+
+    # bit 2 (original)
+    original = (bytes[3] & 4) >> 2
+
+    # bit 1 - 0 (emphasis)
+    emphasis = bytes[3] & 3
+
+    return version, layer, crc, bitrate, samplingrate, padding, private, channelmode, modeextension, copyright, original, emphasis
 
 def time(hdr):
     """time(header) -> seconds
@@ -141,7 +154,7 @@ def framedata(dat, i, hdr):
 
     Extract the actual MP3-frame data from the MP3-frame starting at
     offset i in buf."""
-    
+
     version, layer, crc, bitrate, samplingrate, padding = hdr
     start = i + 4 + crc * 2
     end = i + framelen(hdr)
@@ -168,11 +181,11 @@ def framelen(hdr):
 
 def frames(f):
     """frames(file) -> (header, frame) generator
-    
+
     Extract all MP3-frames from a file-like object, returning them as
     (header, data) tuples, where header is as returned by frameheader
     and data is the entire MP3-frame data (including header).
-    
+
     This is (unlike all other MP3 readers and players I know of) a
     strict MP3-reader; if there are any errors or bogus data in the file
     MP3Error is raised. The only accomodation made for non-MP3 data is
@@ -238,7 +251,7 @@ def frames(f):
 
 def good_data(f):
     """good_data(file) -> good-data-buffer generator
-    
+
     Extract all MP3-frames and ID3-tags from a file-like object,
     yielding their raw data buffers one at a time."""
 
@@ -258,7 +271,7 @@ def good_data(f):
             # ID3v1 tag
             good = 1
             length = 128
-            
+
         elif buffer.startswith('ID3', index) and max - index > 9:
             # IV3v2 tag
             good = 1
@@ -266,7 +279,7 @@ def good_data(f):
                      (ord(buffer[index + 7]) << 14) + \
                      (ord(buffer[index + 8]) << 7) + \
                      ord(buffer[index + 9]) + 10
-                     
+
         elif buffer[index] == '\xff' and \
              not buffer[index + 1] == '\xff' and \
              (ord(buffer[index + 1]) & 224) == 224:
