@@ -86,7 +86,6 @@ def bitpack_into(fmt, buffer, offset, *values):
 
         i += 1
 
-@profile
 def bitunpack_from(fmt, buffer, offset = 0):
     fmt = isinstance(fmt, formatstr) and fmt or formatstr(fmt)
 
