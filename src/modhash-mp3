@@ -1,0 +1,189 @@
+#!/usr/bin/env python
+
+import sys
+import shutil
+import mp3
+import id3
+import os
+import argparse
+import signal
+import platform
+import plistlib
+import urllib2
+import glob
+import itertools
+
+want_exit = False
+_system = platform.system()
+_copy_xattrs = _system == 'Darwin' or _system == 'Linux'
+_itunes_available = False
+
+# This is from http://support.apple.com/kb/HT1660
+if _system == 'Darwin':
+    _itunes_available = True
+    _itunes_path = '%s/Music/iTunes/iTunes Library.xml' % os.environ['HOME']
+elif _system == 'Windows':
+    # TODO: Make sure this is correct
+    _itunes_available = True
+    _itunes_path = "%s\\My Music\\iTunes\\iTunes Library.xml" % os.environ['USERPROFILE']
+
+del _system
+
+if _copy_xattrs:
+    from xattr import xattr
+
+def getiTunesDatabase(path = None):
+    print "Loading iTunes database..."
+    
+    library_path = path and path or _itunes_path
+    library = plistlib.readPlist(library_path)
+    
+    for track in library['Tracks'].itervalues():
+        if not track['Location']:
+            continue
+        
+        location = urllib2.unquote(track['Location'])
+        
+        if not location.startswith('file://localhost'):
+            # TODO: Does this apply to all iTunes versions?
+            continue
+        
+        location = location[16:]
+            
+        yield location
+
+def copystat(src, dst):
+    """Copy file permissions, modification date & time, extended attributes, etc."""
+    shutil.copystat(src, dst)
+    
+    if _copy_xattrs:
+        src = xattr(src)
+        dst = xattr(dst)
+        dst.update(src)
+
+def process_mp3(infile_name, outfile_name, drop_riff=False, replace_original=False, ignore_invalid=True):
+    global want_exit
+
+    if not infile_name.lower().endswith('.mp3'):
+        print "Not an MP3 file: " + infile_name
+        return
+
+    try:
+        infile = open(infile_name, 'rb')
+    except IOError:
+        print "Failed to open input file: %s" % infile_name
+        return
+
+    try:
+        outfile = open(outfile_name, 'wb')
+    except IOError:
+        print "Failed to open output file: %s" % outfile_name
+        infile.close()
+        return
+
+    try:
+        for frame in mp3.Reader(infile).frames(ignore_invalid_data=ignore_invalid, emit_riff_frames = not drop_riff):
+            if isinstance(frame, mp3.MPEGFrame):
+                frame.header.private = not frame.header.private
+                frame.header.original = not frame.header.original
+                frame.commit_header()
+
+            outfile.write(frame.view)
+
+            if want_exit:
+                outfile.flush()
+                outfile.close()
+                os.unlink(outfile_name)
+                break
+    finally:
+        infile.close()
+        outfile.close()
+
+    copystat(infile_name, outfile_name)
+
+    if replace_original:
+        shutil.move(infile_name, infile_name + ".old")
+        shutil.move(outfile_name, infile_name)
+
+def main():
+    global want_exit
+    
+    parser = argparse.ArgumentParser(description="Change file hash of MP3 files.")
+    group_input = parser.add_mutually_exclusive_group()
+    if _itunes_available:
+        group_input.add_argument('--itunes', dest='read_from_itunes', action='store_true',
+            help='batch process all tracks in your iTunes database')
+    group_input.add_argument('-i', '--input', dest='infile', default=None, nargs='+',
+        help='process individual files')
+    group_output = parser.add_mutually_exclusive_group()
+    group_output.add_argument('-o', '--output', dest='outfile',
+        help='output to a certain file')
+    group_output.add_argument('-d', '--outdir', dest='outdir',
+        help='write output to specified directory')
+    group_output.add_argument('--replace', dest='replace_original', action='store_true',
+        help='edit files in place (CAUTION)')
+    parser.add_argument('--drop-riff', dest='drop_riff', action='store_true', help='drop RIFF frames')
+    parser.add_argument('--ignore-invalid', default=True, dest='ignore_invalid', action='store_true', help='ignore invalid data')
+
+    args = parser.parse_args()
+
+    ## Input
+    queued_files = None
+    if args.read_from_itunes:
+        queued_files = getiTunesDatabase()
+    elif args.infile:
+        queued_files = itertools.chain.from_iterable(glob.iglob(x) for x in args.infile)
+    else:
+        parser.error("Please specify input file(s).")
+
+    def get_outfile(infile):
+        (indir, file) = os.path.split(infile)
+        (file, ext) = os.path.splitext(file)
+
+        # TODO: Make this prettier somehow
+        if indir and indir[-1] != '/':
+            indir += '/'
+
+        return output_format % {'indir': indir, 'file': file, 'ext': ext,
+            'outdir': args.outdir, 'outfile': args.outfile}
+
+    ## Output
+    output_format = None
+    if args.replace_original:
+        output_format = "%(indir)s%(file)s.tmp"
+    elif args.outdir:
+        if not os.path.exists(args.outdir):
+            os.makedirs(args.outdir)
+
+        if args.outdir[-1] != '/':
+            args.outdir += '/'
+
+        output_format = "%(outdir)s%(file)s%(ext)s"
+    elif not args.read_from_itunes and args.outfile:
+        # This only makes sense for a single file
+        output_format = "%(outfile)s"
+    else:
+        output_format = "%(indir)s%(file)s.new%(ext)s"
+
+    want_exit = False
+    def signal_sigint(signal, frame):
+        global want_exit
+        want_exit = True
+        print "\nExiting"
+
+    signal.signal(signal.SIGINT, signal_sigint)
+
+    for infile in queued_files:
+        outfile = get_outfile(infile)
+        print "%s --> %s" % (infile, outfile)
+
+        process_mp3(infile, outfile, drop_riff=args.drop_riff, \
+            replace_original=args.replace_original, ignore_invalid=args.ignore_invalid)
+        
+        if want_exit:
+            break
+    
+    sys.exit(0)
+    
+if __name__ == '__main__':
+    main()
