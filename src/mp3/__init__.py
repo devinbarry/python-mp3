@@ -1,6 +1,7 @@
 #
 # mp3.py -- MP3-frame meta-data parser
 # Copyright (C) 2003-2004  Sune Kirkeby
+#               2012       Lorenz Bauer
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -25,8 +26,9 @@ raw frame-data and meta-data (such as frame bitrates)."""
 from __future__ import generators
 from collections import namedtuple
 import struct
-from _bitpack import bitunpack_from, bitpack_into, formatstr as bitpack_formatstr
+from _bitpack import bitpack_into, formatstr as bitpack_formatstr, invalid_input_error
 from _crc16 import crc16
+from _buffer import ZeroCopyBuffer
 import os
 import math
 
@@ -39,6 +41,7 @@ class MP3FrameHeaderError(MP3Error):
     pass
 
 class _InvalidFrame(Exception):
+    """I signal that the parsing of the current frame type failed."""
     pass
 
 class Channelmode:
@@ -46,26 +49,25 @@ class Channelmode:
     http://www.mp3-tech.org/programmer/frame_header.html for further information."""
     STEREO, JOINT_STEREO, DUAL_CHANNEL, MONO = range(4)
 
-class _Bunch:
-    def __init__(self, **kwds):
-        self.__dict__.update(kwds)
-
-def _unpack_from(fmt, buf, offset = 0):
-    return struct.unpack_from(fmt, buffer(buf), offset)
-
-def _pack_into(fmt, buf, offset, *vals):
-    return struct.pack_into(fmt, buf, offset, *vals)
-
 class Frame(object):
+    """Basic frame object, all other frametypes extend from this."""
     _buffer = None
     length = None
 
     @property
+    def view(self):
+        """view() -> memoryview
+        
+        Returns a memoryview of the frame's data.
+        """
+        return self._buffer.view()
+    
     def bytes(self):
-        return self._buffer
-
-    def __str__(self):
-        return str(self._buffer)
+        """bytes() -> bytearray()
+        
+        Returns a copy of the frame's data.
+        """
+        return self._buffer.bytes()
 
     def __eq__(self, other):
         if isinstance(other, Frame):
@@ -74,70 +76,88 @@ class Frame(object):
             return self._buffer == other
 
     def _frame_assembled(self):
+        """Implement this method if you need to do sth. as soon
+        as the frames buffer is available."""
         pass
 
-    def append(self, view):
-        self._buffer = bytearray(view[0:self.length])
+    def append(self, buf):
+        """append(buf) -> nothing
+        
+        Append data from buf to this frame, up to the frame's
+        length. Expects a ZeroCopyBuffer as input.
+        """
+        self._buffer = ZeroCopyBuffer(self.length)
+        buf.delete(self._buffer.extend(buf))
+        
+        if (len(self._buffer) < self.length):
+            assert(len(buf) == 0)
+            self._buffer.fill(buf._fileobj, completely=True)
+        
+        assert(len(self._buffer) == self.length)
         self._frame_assembled()
 
 class MetaFrame(Frame):
+    """Parent class for all meta-data related frames."""
     pass
 
 class ID3Frame(MetaFrame):
+    """Represents and ID3v1/2 frame (storing file meta-data)."""
     V1, V2 = range(2)
 
     version = None
 
-    def __init__(self, buffer, fileobj = None, offset = 0, strict = False):
-        if buffer.startswith('TAG', offset):
+    def __init__(self, buf, fileobj = None, offset = 0, strict = False):
+        if buf.startswith('TAG', offset):
             self.version = self.V1
             self.length  = 128
-        elif buffer.startswith('ID3', offset):
+        elif buf.startswith('ID3', offset):
             self.version = self.V2
 
-            if len(buffer) < 10:
+            if len(buf) < 10:
                 raise MP3Error, 'need at least 10 bytes of data'
 
-            self.length = (buffer[offset + 6] << 21) + (buffer[offset + 7] << 14) + \
-                (buffer[offset + 8] << 7) + (buffer[offset + 9]) + 10
+            self.length = (buf[offset + 6] << 21) + (buf[offset + 7] << 14) + \
+                (buf[offset + 8] << 7) + (buf[offset + 9]) + 10
         else:
             raise _InvalidFrame
 
 class APEFrame(MetaFrame):
+    """Represents and APETAGv1/2 frame (storing file meta-data)."""
     V1, V2 = range(2)
     _HEADER_SIZE = 32
 
     version = None
 
-    def __init__(self, buffer, fileobj = None, offset = 0, strict = False):
-        if not buffer.startswith('APETAGEX', offset):
+    def __init__(self, buf, fileobj = None, offset = 0, strict = False):
+        if not buf.startswith('APETAGEX', offset):
             raise _InvalidFrame
 
-        version, length = _unpack_from('<II', buffer, offset + 8)
+        version, length = buf.unpack('<II', offset + 8)
         if version == 2000: self.version = self.V2
         elif version == 1000: self.version = self.CV1
 
         self.length = length + self._HEADER_SIZE
 
 class RIFFFrame(Frame):
-    def __init__(self, buffer, fileobj = None, offset = 0, strict = False):
-        if buffer.startswith('RIFF', offset) and buffer.startswith('WAVE', offset + 8):
+    """Represents a RIFF frame (commonly used for compatibility with broken Windows players)."""
+    def __init__(self, buf, fileobj = None, offset = 0, strict = False):
+        if buf.startswith('RIFF', offset) and buf.startswith('WAVE', offset + 8):
             if fileobj: fileobj._has_riff_header = True
             self.length = 12
 
         elif fileobj is None or fileobj._has_riff_header:
-            if buffer.startswith('data', offset):
+            if buf.startswith('data', offset):
                 self.length = 8
 
-            elif buffer.startswith('fmt ', offset):
-                self.length, format = _unpack_from('<IH', buffer, offset + 4)
+            elif buf.startswith('fmt ', offset):
+                self.length, fmt = buf.unpack('<IH', offset + 4)
                 self.length += 8
 
-                if format != 0x55: # Not MPEG 1 Layer III data
-                    raise MP3Error('encountered RIFF file with non MPEG 1 Layer III data, format = 0x%x' % format)
+                if fmt != 0x55: # Not MPEG 1 Layer III data
+                    raise MP3Error('encountered RIFF file with non MPEG 1 Layer III data, fmt = 0x%x' % fmt)
 
-            elif buffer.startswith('fact', offset):
-                self.length, = _unpack_from('<I', buffer, offset + 4)
+            elif buf.startswith('fact', offset):
+                self.length, = buf.unpack('<I', offset + 4)
                 self.length += 8
 
             else:
@@ -146,10 +166,13 @@ class RIFFFrame(Frame):
             raise _InvalidFrame
 
 class MPEGFrame(Frame):
-    def __init__(self, buffer, fileobj = None, offset = 0, strict = False):
+    header = None
+    
+    """Represents an MPEG frame (storing raw audio data)."""
+    def __init__(self, buf, fileobj = None, offset = 0, strict = False):
         try:
-            header = Header(buffer, offset)
-        except MP3FrameHeaderError, e:
+            header = Header(buf, offset)
+        except MP3FrameHeaderError:
             raise _InvalidFrame
 
         self.header = header
@@ -166,7 +189,10 @@ class MPEGFrame(Frame):
         self.header.update(self._buffer)
 
     def commit_header(self):
-        self._buffer[0:self.header.length()] = self.header.bytes()
+        """commit_header() -> nothing
+        
+        Stores a modified header in the frames data."""
+        self._buffer.replace(self.header.bytes())
 
     @classmethod
     def _calculate_length(cls, header):
@@ -188,18 +214,16 @@ class MPEGFrame(Frame):
         return ((mul * bitrate * 1000 / samplingrate) + (padding * slot)) * slot
 
 class XingFrame(MPEGFrame):
+    """Represents a Xing frame (storing VBR encoding information)."""
+    
     _MIN_HEADER_SIZE = 4 + 4
 
-    def __init__(self, buffer, fileobj = None, offset = 0, strict = False):
+    def __init__(self, buf, fileobj = None, offset = 0, strict = False):
         if fileobj and fileobj._has_xing_header == False:
             raise _InvalidFrame
 
-        mpeg_length = super(XingFrame, self).\
-            __init__(buffer, fileobj, offset=offset, strict=strict)
-
-        if not mpeg_length:
-            if fileobj: fileobj._has_xing_header = False
-            raise _InvalidFrame
+        super(XingFrame, self).\
+            __init__(buf, fileobj, offset=offset, strict=strict)
 
         header = self.header
 
@@ -207,14 +231,14 @@ class XingFrame(MPEGFrame):
         # has CRC enabled. Check both places.
         offset += header.length(True)
 
-        if buffer.startswith('Xing', offset) or buffer.startswith('Info', offset) or \
-            (header.crc and (buffer.startswith('Xing', offset + 2) or \
-            buffer.startswith('Info', offset + 2))):
+        if buf.startswith('Xing', offset) or buf.startswith('Info', offset) or \
+            (header.crc and (buf.startswith('Xing', offset + 2) or \
+            buf.startswith('Info', offset + 2))):
 
             if fileobj: fileobj._has_xing_header = True
 
             self.has_vbr_quality, self.has_toc, self.has_total_size, self.has_total_frames = \
-                [bool(buffer[offset+7] & 1 << 3 - i) for i in xrange(4)]
+                [bool(buf[offset+7] & 1 << 3 - i) for i in xrange(4)]
 
             length = header.length() + self._MIN_HEADER_SIZE
             if self.has_vbr_quality:  length += 4
@@ -223,9 +247,8 @@ class XingFrame(MPEGFrame):
             if self.has_total_frames: length += 4
 
             self.xing_length = length
-            self.length = mpeg_length
 
-            assert(mpeg_length >= length)
+            assert(self.length >= length)
 
         else:
             if fileobj: fileobj._has_xing_header = False
@@ -237,22 +260,26 @@ class XingFrame(MPEGFrame):
         offset = self.header.length() + self._MIN_HEADER_SIZE
 
         if self.has_total_frames:
-            self.total_frames, = _unpack_from('>I', buffer, offset)
+            self.total_frames, = self._buffer.unpack('>I', offset)
             offset += 4
 
         if self.has_total_size:
-            self.total_size, = _unpack_from('>I', buffer, offset)
+            self.total_size, = self._buffer.unpack('>I', offset)
             offset += 4
 
         if self.has_toc:
-            self.toc = list(_unpack_from('>100B', buffer, offset))
-            self.offset += 100
+            self.toc = list(self._buffer.unpack('>100B', offset))
+            offset += 100
 
         if self.has_vbr_quality:
-            self.vbr_quality, = _unpack_from('>I', buffer, offset)
-            self.offset += 4
+            self.vbr_quality, = self._buffer.unpack('>I', offset)
+            offset += 4
 
     def seekpoint(self, percent, file_size = None):
+        """seekpoint(percent, file_size = None) -> byte offset in file
+        
+        Returns a byte offset for the specified file_size, according to
+        the Xing header specification."""
         percent *= 1.0
         file_size = file_size or self.total_size
 
@@ -270,6 +297,7 @@ class XingFrame(MPEGFrame):
 
 
 class Reader(object):
+    """Reader object representing a stream of MPEG/ID3/APE/RIFF frames."""
     _FRAME_TYPES = (XingFrame, MPEGFrame, RIFFFrame, ID3Frame, APEFrame)
     _MIN_FRAME_SIZE = 38
 
@@ -280,25 +308,33 @@ class Reader(object):
     _mpeg_version = None
     _mpeg_layer = None
 
-    _blocksize = 8192
+    _buffer_size = None
 
-    def __init__(self, inobj):
+    def __init__(self, inobj, buffer_size=8192):
         self._inobj = inobj
+        self._buffer_size = buffer_size
 
     def frames(self, ignore_invalid_data = True, emit_meta_frames = True, \
         emit_riff_frames = True):
+        """frames(ignore_invalid_data = True, emit_meta_frames = True, \
+            emit_riff_frames = True) -> frame data
+        
+        Reads frames one-by-one, according to the method's arguments.
+        Raises an MP3Error if invalid data is encountered and ingore_invalid_data
+        is False.
+        """
         in_sync = True
 
         try:
-            buffer = bytearray()
-            buffer.extend(self._inobj.read(self._blocksize))
+            buf = ZeroCopyBuffer(self._buffer_size, self._inobj)
+            buf.fill()
 
-            while len(buffer) > 4: # We need at least 4 bytes for our shortest header
+            while len(buf) > 4: # We need at least 4 bytes for our shortest header
                 # Try to parse a frame
                 frame = None
                 for frame_class in self._FRAME_TYPES:
                     try:
-                        frame = frame_class(buffer, self, strict=not in_sync)
+                        frame = frame_class(buf, self, strict=not in_sync)
                         break
                     except _InvalidFrame:
                         pass
@@ -306,12 +342,12 @@ class Reader(object):
                 if frame and not in_sync:
                     # Recover from lost sync
                     try:
-                        self._fill_buffer(buffer, frame.length + 12)
+                        buf.fill(at_least = frame.length + 12)
 
                         # See if there is a consequent valid frame
                         for frame_class in self._FRAME_TYPES:
                             try:
-                                frame_class(buffer, self, offset=frame.length, strict=True)
+                                frame_class(buf, self, offset=frame.length, strict=True)
                                 in_sync = True
                                 break
                             except _InvalidFrame:
@@ -323,10 +359,8 @@ class Reader(object):
                         pass
 
                 if frame:
-                    self._fill_buffer(buffer, frame.length)
-
-                    frame.append(memoryview(buffer))
-                    del buffer[:frame.length]
+                    # Consumed data is removed from the buffer in Frame.append()
+                    frame.append(buf)
 
                     if (isinstance(frame, MetaFrame) and emit_meta_frames) or \
                         (isinstance(frame, RIFFFrame) and emit_riff_frames) or \
@@ -338,25 +372,18 @@ class Reader(object):
                     if not ignore_invalid_data:
                         raise MP3Error('encountered invalid data')
 
-                    del buffer[:1]
+                    buf.delete(1)
 
-                buffer.extend(self._inobj.read(self._blocksize))
+                if len(buf) < 12:
+                    buf.fill(self._inobj)
         except EOFError:
             if not ignore_invalid_data:
                 raise MP3Error('encountered invalid data')
         finally:
-            del buffer
-
-    def _fill_buffer(self, buffer, want_length):
-        while len(buffer) < want_length:
-            inbuf = self._inobj.read(self._blocksize)
-            if len(inbuf) == 0: break
-            buffer.extend(inbuf)
-
-        if len(buffer) < want_length:
-            raise EOFError
+            del buf
 
 class Header(object):
+    """Represents an MPEG frame header."""
     _BITRATES = [
         # Version 1
         [
@@ -390,19 +417,19 @@ class Header(object):
     ]
 
     _HEADER = (
-        ('i:11', 'sync'),
-        ('i:2',  'version'),
-        ('i:2',  'layer'),
-        ('b',    'crc'),
-        ('i:4',  'bitrate'),
-        ('i:2',  'samplingrate'),
-        ('b',    'padding'),
-        ('b',    'private'),
-        ('i:2',  'channelmode'),
-        ('i:2',  'modeextension'),
-        ('b',    'copyright'),
-        ('b',    'original'),
-        ('i:2',  'emphasis')
+        ('i:11=0x7ff', 'sync'),
+        ('i:2',        'version'),
+        ('i:2',        'layer'),
+        ('b',          'crc'),
+        ('i:4',        'bitrate'),
+        ('i:2',        'samplingrate'),
+        ('b',          'padding'),
+        ('b',          'private'),
+        ('i:2',        'channelmode'),
+        ('i:2',        'modeextension'),
+        ('b',          'copyright'),
+        ('b',          'original'),
+        ('i:2',        'emphasis')
     )
 
     _FORMAT, _FIELDS = zip(*_HEADER)
@@ -411,80 +438,115 @@ class Header(object):
     _crc16 = None
     _side_info = None
 
-    def __init__(self, buffer, offset = 0):
-        if buffer is None:
+    def __init__(self, buf, offset = 0):
+        """__init__(buf, offset = 0)
+        
+        Read an MPEG frame header from buf at position offset. Raises
+        an MP3FrameHeaderError if no valid header can be found.
+        """
+        if buf is None:
             self.__dict__.update(dict.fromkeys(self._FIELDS))
         else:
-            self.__dict__.update( \
-                zip(self._FIELDS, bitunpack_from(self._FORMAT, buffer, offset)))
+            try:
+                self.__dict__.update(zip(self._FIELDS, \
+                    buf.bitunpack(self._FORMAT, offset)))
+            except invalid_input_error:
+                raise MP3FrameHeaderError('frame sync not found')
 
             for key in self._FIELDS:
                 # This works as a basic validator
                 getattr(self, key)
+                
+            self.update(buf, offset)
 
-            self.update(buffer, offset)
-
-    def update(self, buffer, offset = 0):
+    def update(self, buf, offset = 0):
+        """update(buf, offset = 0) -> nothing
+        
+        Updates the headers data from buf at position offset. This
+        is useful if you instantiated the header from a minimal buffer
+        (of 4 bytes) and now want to read the crc and side channel
+        information from the buffer.
+        """
         # Read up to max(side_chan_info) + crc
-        length = len(buffer)
+        length = len(buf)
         offset += 4 # Skip header
 
         if self.crc:
             if not self._crc16 and length >= offset + 2:
-                self._crc16, = _unpack_from('>H', buffer, offset)
-
+                self._crc16, = buf.unpack('>H', offset)
             offset += 2
 
         if not self._side_info and length >= offset + self.side_info_size():
-            self._side_info = buffer[offset : offset + self.side_info_size()]
+            self._side_info = buf.bytes(offset, self.side_info_size())
 
 
     def bytes(self, include_crc = True):
-        buffer = bytearray(self._FORMAT.length)
-        bitpack_into(self._FORMAT, buffer, 0, *[self.__dict__[k] for k in self._FIELDS])
+        """bytes(include_crc = True) -> bytearray
+        
+        Returns a representation of the header in packed binary format.
+        If include_crc is False, the CRC will be omitted regardless of
+        the header.crc flag.
+        """
+        buf = bytearray(self._FORMAT.length)
+        bitpack_into(self._FORMAT, buf, 0, *[self.__dict__[k] for k in self._FIELDS])
 
-        pos = len(buffer)
-        buffer.extend(self._side_info)
+        pos = len(buf)
+        buf.extend(self._side_info)
 
         if include_crc and self.crc:
-            crc = crc16(memoryview(buffer)[2:])
-            buffer[pos:pos] = 2 # Inserts two bytes at pos
-            _pack_into('>H', buffer, pos, crc)
+            crc = crc16(memoryview(buf)[2:])
+            buf[pos:pos] = 2 # Inserts two bytes at pos
+            struct.pack_into('>H', buf, pos, crc)
 
-        return buffer
+        return buf
 
     def side_info_size(self):
+        """side_info_size() -> length of side channel info
+        
+        Returns the length of the side channel informaton in bytes.
+        """
         return self._SIDE_INFO_SIZE[self.version > 1][self.channelmode == Channelmode.MONO]
 
     def length(self, include_crc = True, include_side_info = True):
+        """length(include_crc = True, include_side_info = True) -> length of the header
+        
+        Returns the length of the header in bytes.
+        """
         return 4 + include_crc * self.crc * 2 +  include_side_info * self.side_info_size()
 
     def valid(self):
+        """valid() -> bool
+        
+        Validates the frame's CRC if present. Returns True if the frame is not
+        protected by a CRC.
+        """
         if not self.crc:
             return True
 
         return self._crc16 == self.calculate_crc()
 
     def calculate_crc(self):
+        """calculate_crc() -> CRC value
+        
+        Returns the frame's calculated CRC, based on the information present in
+        the header. This is the value that _should_ be in the bytestream, not the
+        one that is. Use header._crc16 to get this.
+        """
         # TODO: Check for empty side info?
         # First two bytes of the header are skipped
-        buffer = self.bytes(include_crc = False)
-        return crc16(memoryview(buffer)[2:])
+        buf = self.bytes(include_crc = False)
+        return crc16(memoryview(buf)[2:])
 
     def time(self):
+        """time() -> running time in seconds
+        
+        Returns the frame's running time in seconds.
+        """
         return (self.layer == 1) and (384.0 / 44100) or (1152.0 / 44100)
 
     @property
-    def sync(self):
-        sync = self.__dict__['sync']
-
-        if sync != 0x7FF:
-            raise MP3FrameHeaderError, 'frame sync not found'
-
-        return sync
-
-    @property
     def version(self):
+        """MPEG Version. Possible values are 1, 2 and 2.5."""
         version = self.__dict__['version']
 
         if version == 0:
@@ -507,6 +569,7 @@ class Header(object):
 
     @property
     def layer(self):
+        """MPEG Layer. Possible values are 1, 2, 3."""
         layer = self.__dict__['layer']
 
         if layer == 0:
@@ -527,6 +590,7 @@ class Header(object):
 
     @property
     def crc(self):
+        """Is the frame protected by a CRC?"""
         return not self.__dict__['crc']
 
     @crc.setter
@@ -535,6 +599,7 @@ class Header(object):
 
     @property
     def bitrate(self):
+        """Frame's bitrate."""
         bitrate = self.__dict__['bitrate']
 
         if bitrate == 0xF or bitrate == 0x0:
@@ -547,11 +612,12 @@ class Header(object):
         try:
             self.__dict__['bitrate'] = \
                 self._BITRATES[int(self.version)-1][self.layer-1].index(value) + 1
-        except ValueError as e:
+        except ValueError:
             raise MP3FrameHeaderError('invalid bitrate: %d' % value)
 
     @property
     def samplingrate(self):
+        """Frame's samplingrate."""
         samplingrate = self.__dict__['samplingrate']
         version = self.version
 
@@ -574,7 +640,7 @@ class Header(object):
         try:
             self.__dict__['samplingrate'] = \
                 self._SAMPLINGRATES[int(version)-1].index(value)
-        except ValueError as e:
+        except ValueError:
             if version == 2.5: value /= 2
             raise MP3FrameHeaderError('invalid sampling-rate: %d' % value)
 
