@@ -32,14 +32,15 @@ class ZeroCopyBuffer(object):
         '''
         __init__(size) -> ZeroCopyBuffer object
         
-        Initializes a buf of specified size.
+        Initializes a buffer of specified size.
         '''
         
-        self._size = size
-        self._buffer = _buffer or bytearray(size)
+        self._size = _buffer and len(_buffer) or size
+        self._len = _buffer and self._size or 0
+        self._buffer = _buffer and bytearray(_buffer) or bytearray(size)
         self._fileobj = fileobj
+        self._has_readinto = hasattr(fileobj, 'readinto')
         self._pos = 0
-        self._len = 0
         
     def __len__(self):
         return self._len - self._pos
@@ -110,7 +111,13 @@ class ZeroCopyBuffer(object):
             raise TypeError('fileobj is not a valid file-like object')
         
         m = memoryview(self._buffer)[self._len:]
-        length = fileobj.readinto(m)
+        if self._has_readinto:
+            length = fileobj.readinto(m)
+        else:
+            buf = fileobj.read(len(m))
+            length = len(buf)
+            m[:length] = buf
+
         if length: self._len += length
         
         if completely and self._len != self._size:
@@ -140,8 +147,12 @@ class ZeroCopyBuffer(object):
         
         return length
     
-    def delete(self, length):
-        self._pos = min(self._pos + length, self._len)
+    def delete(self, num):
+        '''delete(num) -> nothing
+        
+        Delete the first num bytes from the buffer.
+        '''
+        self._pos = min(self._pos + num, self._len)
         
     def replace(self, src, offset = 0):
         if offset < 0:
