@@ -39,8 +39,10 @@ good_frame_data = bytearray( \
 
 good_frame_header = 1, 3, 0, 128, 44100, 0
 
-good_frame_new = mp3.MPEGFrame(good_frame_data)
-good_frame_new.append(memoryview(good_frame_data))
+tmp = mp3.ZeroCopyBuffer(None, _buffer=good_frame_data)
+good_frame_new = mp3.MPEGFrame(tmp)
+good_frame_new.append(tmp)
+del tmp
 
 
 riff_chunk = 'fmt %sHello, World!' % struct.pack('<LH', len('Hello, World!')+2, 0x55)
