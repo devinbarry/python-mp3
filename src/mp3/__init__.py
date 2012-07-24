@@ -32,6 +32,11 @@ from _buffer import ZeroCopyBuffer
 import os
 import math
 
+__all__ = ['APEFrame', 'Channelmode', 'Frame', 'Header', 'ID3Frame', 'MP3Error', \
+           'MP3FrameHeaderError', 'MPEGFrame', 'MetaFrame', 'RIFFFrame', 'Reader', \
+           'XingFrame', 'ZeroCopyBuffer', 'framedata', 'frameheader', 'framelen', \
+           'frames', 'good_data']
+
 class MP3Error(Exception):
     """I signal a generic error related to MP3-data."""
     pass
@@ -216,6 +221,8 @@ class MPEGFrame(Frame):
 class XingFrame(MPEGFrame):
     """Represents a Xing frame (storing VBR encoding information)."""
     
+    # TODO: Be able to fix corrupt Xing frames
+    
     _MIN_HEADER_SIZE = 4 + 4
 
     def __init__(self, buf, fileobj = None, offset = 0, strict = False):
@@ -314,10 +321,10 @@ class Reader(object):
         self._inobj = inobj
         self._buffer_size = buffer_size
 
-    def frames(self, ignore_invalid_data = True, emit_meta_frames = True, \
-        emit_riff_frames = True):
-        """frames(ignore_invalid_data = True, emit_meta_frames = True, \
-            emit_riff_frames = True) -> frame data
+    def frames(self, skip_invalid_data = True, emit_meta_frames = True, \
+        emit_riff_frames = True, emit_id3_frames = True, emit_ape_frames = True):
+        """frames(skip_invalid_data = True, emit_meta_frames = True, \
+            emit_riff_frames = True, emit_id3_frames = True, emit_ape_frames = True) -> frame data
         
         Reads frames one-by-one, according to the method's arguments.
         Raises an MP3Error if invalid data is encountered and ingore_invalid_data
@@ -362,14 +369,15 @@ class Reader(object):
                     # Consumed data is removed from the buffer in Frame.append()
                     frame.append(buf)
 
-                    if (isinstance(frame, MetaFrame) and emit_meta_frames) or \
+                    if (isinstance(frame, ID3Frame) and (emit_meta_frames or emit_id3_frames)) or \
+                        (isinstance(frame, APEFrame) and (emit_meta_frames or emit_ape_frames)) or \
                         (isinstance(frame, RIFFFrame) and emit_riff_frames) or \
                         isinstance(frame, MPEGFrame):
                         yield frame
                 else:
                     in_sync = False
 
-                    if not ignore_invalid_data:
+                    if not skip_invalid_data:
                         raise MP3Error('encountered invalid data')
 
                     buf.delete(1)
@@ -377,7 +385,7 @@ class Reader(object):
                 if len(buf) < 12:
                     buf.fill(self._inobj)
         except EOFError:
-            if not ignore_invalid_data:
+            if not skip_invalid_data:
                 raise MP3Error('encountered invalid data')
         finally:
             del buf
@@ -726,7 +734,7 @@ def frames(f):
     ID3 tags, which it will skip."""
 
     reader = Reader(f)
-    for frame in reader.frames(ignore_invalid_data = False, emit_meta_frames = False):
+    for frame in reader.frames(skip_invalid_data = False, emit_meta_frames = False):
         yield _HeaderWrapper(frame.header), frame
 
 def good_data(f):
@@ -736,6 +744,6 @@ def good_data(f):
     yielding their raw data buffers one at a time."""
 
     reader = Reader(f)
-    for frame in reader.frames(ignore_invalid_data = True, emit_meta_frames = True, \
+    for frame in reader.frames(skip_invalid_data = True, emit_meta_frames = True, \
         emit_riff_frames = False):
         yield frame
