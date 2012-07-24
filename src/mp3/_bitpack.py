@@ -32,10 +32,25 @@ class invalid_input_error(error):
     pass
 
 class formatstr(object):
+    """This 'precompiles' a formatting string into something useable.
+
+    A format string might look like this: i:11=0x7f,b,b,i:2. It defines the first 11 bits
+    to be an integer, which has to match 0x7f when read from a buffer (otherwise
+    invalid_input_error is raised), followed by two booleans and another integer of 2 bits.
+    In total, 15 bits are consumed. Packing and unpacking only operates on byte boundaries.
+
+    The following types are recognized:
+     - int ('i:n'): integer of length n bits
+     - boolean ('b'): boolean of length 1 bit
+    """
     format = None
     length = None
 
     def __init__(self, fmt):
+        """__init__(self, fmt) -> new instance
+
+        fmt can be a string separated by commas or any Iterable containing strings.
+        """
         if isinstance(fmt, str):
             fmt = fmt.split(',')
         elif not isinstance(fmt, collections.Iterable):
