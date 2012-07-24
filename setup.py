@@ -31,6 +31,11 @@ if sys.version_info < (2, 7, 0):
 def read(fname):
     return open(os.path.join(os.path.dirname(__file__), fname)).read()
 
+if sys.platform.startswith('darwin') or sys.platform.startswith('linux'):
+    install_requires = ['xattr>=0.6.4']
+else:
+    install_requires = []
+
 setup(name = "MP3 Tools", version = "0.2",
       author = "Lorenz Bauer, Sune Kirkeby",
       url = "https://github.com/lmb/python-mp3",
@@ -45,5 +50,6 @@ setup(name = "MP3 Tools", version = "0.2",
         'id3',
       ],
       package_dir = { '': 'src' },
-      test_suite='mp3.tests.suite'
+      test_suite = 'mp3.tests.suite',
+      install_requires = install_requires
     )
