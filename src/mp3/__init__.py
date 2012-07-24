@@ -731,10 +731,11 @@ def frames(f):
     This is (unlike all other MP3 readers and players I know of) a
     strict MP3-reader; if there are any errors or bogus data in the file
     MP3Error is raised. The only accomodation made for non-MP3 data is
-    ID3 tags, which it will skip."""
+    ID3/APE tags and RIFF frames, which it will skip."""
 
     reader = Reader(f)
-    for frame in reader.frames(skip_invalid_data = False, emit_meta_frames = False):
+    for frame in reader.frames(skip_invalid_data = False, emit_meta_frames = False, \
+        emit_riff_frames=False):
         yield _HeaderWrapper(frame.header), frame
 
 def good_data(f):
