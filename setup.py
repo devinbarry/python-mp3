@@ -2,6 +2,7 @@
 #
 # MP3 Tools -- Setup script for Python MP3 tools
 # Copyright (C) 2004  Sune Kirkeby
+#               2012  Lorenz Bauer
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -20,17 +21,24 @@
 
 from setuptools import setup
 import os
+import sys
+
+if sys.version_info < (2, 7, 0):
+    # We depend on memoryviews that only become available with 2.7
+    sys.stderr.write("python-mp3 requires at least Python 2.7\n")
+    sys.exit(-1)
 
 def read(fname):
     return open(os.path.join(os.path.dirname(__file__), fname)).read()
 
 setup(name = "MP3 Tools", version = "0.2",
-      author = "Sune Kirkeby",
+      author = "Lorenz Bauer, Sune Kirkeby",
       url = "https://github.com/lmb/python-mp3",
       scripts = [
         'src/repair-mp3',
         'src/test-mp3',
         'src/dump-id3',
+        'src/sanitize-mp3'
       ],
       packages = [
         'mp3', 'mp3.tests',
