@@ -126,7 +126,7 @@ def process_mp3(infile_name, outfile_name, options):
 
     copystat(infile_name, outfile_name)
 
-    if replace_original:
+    if options.replace_original:
         shutil.move(infile_name, infile_name + ".old")
         shutil.move(outfile_name, infile_name)
 
@@ -216,7 +216,7 @@ def main():
             break
     
     if num_files == 0:
-        print "No valid input files specified."
+        print "No valid input files specified"
         sys.exit(1)
     
     print "Finished processing specified files"
