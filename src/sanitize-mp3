@@ -119,7 +119,7 @@ def process_mp3(infile_name, outfile_name, options):
             if want_exit:
                 outfile.close()
                 os.unlink(outfile_name)
-                break
+                return
     finally:
         infile.close()
         outfile.close()
