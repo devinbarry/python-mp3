@@ -1,4 +1,22 @@
 #!/usr/bin/env python
+#
+# sanitize-mp3 -- Sanitize your mp3 files and optionally change their hash
+# Copyright (C) 2012 Lorenz Bauer
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#
 
 import sys
 import shutil
@@ -61,7 +79,7 @@ def copystat(src, dst):
         dst = xattr(dst)
         dst.update(src)
 
-def process_mp3(infile_name, outfile_name, drop_riff=False, replace_original=False, ignore_invalid=True):
+def process_mp3(infile_name, outfile_name, options):
     global want_exit
 
     if not infile_name.lower().endswith('.mp3'):
@@ -80,10 +98,18 @@ def process_mp3(infile_name, outfile_name, drop_riff=False, replace_original=Fal
         print "Failed to open output file: %s" % outfile_name
         infile.close()
         return
+    
+    keep_riff = options.keep_riff
+    keep_meta = options.keep_meta
+    keep_id3  = options.keep_id3
+    keep_ape  = options.keep_ape
 
     try:
-        for frame in mp3.Reader(infile).frames(ignore_invalid_data=ignore_invalid, emit_riff_frames = not drop_riff):
-            if isinstance(frame, mp3.MPEGFrame):
+        for frame in mp3.Reader(infile).frames(skip_invalid_data=True, \
+            emit_riff_frames=keep_riff, emit_meta_frames=keep_meta, \
+            emit_id3_frames=keep_id3, emit_ape_frames=keep_ape):
+            
+            if options.mangle and isinstance(frame, mp3.MPEGFrame):
                 frame.header.private = not frame.header.private
                 frame.header.original = not frame.header.original
                 frame.commit_header()
@@ -91,7 +117,6 @@ def process_mp3(infile_name, outfile_name, drop_riff=False, replace_original=Fal
             outfile.write(frame.view)
 
             if want_exit:
-                outfile.flush()
                 outfile.close()
                 os.unlink(outfile_name)
                 break
@@ -108,31 +133,33 @@ def process_mp3(infile_name, outfile_name, drop_riff=False, replace_original=Fal
 def main():
     global want_exit
     
-    parser = argparse.ArgumentParser(description="Change file hash of MP3 files.")
+    parser = argparse.ArgumentParser(description="Sanitize MP3 files.")
     group_input = parser.add_mutually_exclusive_group()
     if _itunes_available:
         group_input.add_argument('--itunes', dest='read_from_itunes', action='store_true',
             help='batch process all tracks in your iTunes database')
     group_input.add_argument('-i', '--input', dest='infile', default=None, nargs='+',
-        help='process individual files')
+        help='process individual file(s)')
+    
     group_output = parser.add_mutually_exclusive_group()
     group_output.add_argument('-o', '--output', dest='outfile',
         help='output to a certain file')
-    group_output.add_argument('-d', '--outdir', dest='outdir',
+    group_output.add_argument('-od', '--outdir', dest='outdir',
         help='write output to specified directory')
     group_output.add_argument('--replace', dest='replace_original', action='store_true',
         help='edit files in place (CAUTION)')
-    parser.add_argument('--drop-riff', dest='drop_riff', action='store_true', help='drop RIFF frames')
-    parser.add_argument('--ignore-invalid', default=True, dest='ignore_invalid', action='store_true', help='ignore invalid data')
-
-    args = parser.parse_args()
+    
+    parser.add_argument('-d', '--drop', dest='drop', nargs='*', choices=('riff', 'id3', 'ape'), help='drop RIFF/ID3/APE frames')
+    parser.add_argument('--mangle', dest='mangle', default=False, action='store_true', help='mangle some MPEG header fields to alter the files\' hash')
+    
+    options = parser.parse_args()
 
     ## Input
     queued_files = None
-    if args.read_from_itunes:
+    if options.read_from_itunes:
         queued_files = getiTunesDatabase()
-    elif args.infile:
-        queued_files = itertools.chain.from_iterable(glob.iglob(x) for x in args.infile)
+    elif options.infile:
+        queued_files = itertools.chain.from_iterable(glob.iglob(x) for x in options.infile)
     else:
         parser.error("Please specify input file(s).")
 
@@ -140,30 +167,34 @@ def main():
         (indir, file) = os.path.split(infile)
         (file, ext) = os.path.splitext(file)
 
-        # TODO: Make this prettier somehow
-        if indir and indir[-1] != '/':
-            indir += '/'
+        indir = os.path.join(indir, '')
 
         return output_format % {'indir': indir, 'file': file, 'ext': ext,
-            'outdir': args.outdir, 'outfile': args.outfile}
+            'outdir': options.outdir, 'outfile': options.outfile}
 
     ## Output
     output_format = None
-    if args.replace_original:
+    if options.replace_original:
         output_format = "%(indir)s%(file)s.tmp"
-    elif args.outdir:
-        if not os.path.exists(args.outdir):
-            os.makedirs(args.outdir)
+    elif options.outdir:
+        if not os.path.exists(options.outdir):
+            os.makedirs(options.outdir)
 
-        if args.outdir[-1] != '/':
-            args.outdir += '/'
+        # Append path separator if needed
+        options.outdir = os.path.join(options.outdir, '')
 
         output_format = "%(outdir)s%(file)s%(ext)s"
-    elif not args.read_from_itunes and args.outfile:
+    elif not options.read_from_itunes and options.outfile:
         # This only makes sense for a single file
         output_format = "%(outfile)s"
     else:
         output_format = "%(indir)s%(file)s.new%(ext)s"
+        
+    ## Other options
+    options.keep_riff = not 'riff' in options.drop
+    options.keep_meta = not 'meta' in options.drop
+    options.keep_id3  = not 'id3'  in options.drop
+    options.keep_ape  = not 'ape'  in options.drop
 
     want_exit = False
     def signal_sigint(signal, frame):
@@ -173,16 +204,22 @@ def main():
 
     signal.signal(signal.SIGINT, signal_sigint)
 
+    num_files = 0
     for infile in queued_files:
         outfile = get_outfile(infile)
         print "%s --> %s" % (infile, outfile)
 
-        process_mp3(infile, outfile, drop_riff=args.drop_riff, \
-            replace_original=args.replace_original, ignore_invalid=args.ignore_invalid)
+        process_mp3(infile, outfile, options)
+        num_files += 1
         
         if want_exit:
             break
     
+    if num_files == 0:
+        print "No valid input files specified."
+        sys.exit(1)
+    
+    print "Finished processing specified files"
     sys.exit(0)
     
 if __name__ == '__main__':
