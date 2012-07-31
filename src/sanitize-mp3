@@ -30,6 +30,7 @@ import plistlib
 import urllib2
 import glob
 import itertools
+from random import getrandbits
 
 want_exit = False
 _system = platform.system()
@@ -115,8 +116,8 @@ def process_mp3(infile_name, outfile_name, options):
             emit_id3_frames=keep_id3, emit_ape_frames=keep_ape):
             
             if options.mangle and isinstance(frame, mp3.MPEGFrame):
-                frame.header.private = not frame.header.private
-                frame.header.original = not frame.header.original
+                frame.header.private = getrandbits(1)
+                frame.header.original = getrandbits(1)
                 frame.commit_header()
 
             outfile.write(frame.view)
