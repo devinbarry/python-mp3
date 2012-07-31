@@ -86,6 +86,11 @@ def process_mp3(infile_name, outfile_name, options):
         print "Not an MP3 file: " + infile_name
         return
 
+    if options.replace_original and os.path.exists(infile_name + '.old') or \
+        os.path.exists(outfile_name):
+        print "Skipping %s" % infile_name
+        return
+
     try:
         infile = open(infile_name, 'rb')
     except IOError:
@@ -149,7 +154,7 @@ def main():
     group_output.add_argument('--replace', dest='replace_original', action='store_true',
         help='edit files in place (CAUTION)')
     
-    parser.add_argument('-d', '--drop', dest='drop', nargs='*', choices=('riff', 'id3', 'ape'), help='drop RIFF/ID3/APE frames')
+    parser.add_argument('-d', '--drop', dest='drop', default=['riff'], nargs='*', choices=('riff', 'id3', 'ape'), help='drop RIFF/ID3/APE frames (default: RIFF)')
     parser.add_argument('--mangle', dest='mangle', default=False, action='store_true', help='mangle some MPEG header fields to alter the files\' hash')
     
     options = parser.parse_args()
